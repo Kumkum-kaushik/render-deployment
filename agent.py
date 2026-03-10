@@ -1,0 +1,688 @@
+import asyncio
+import logging
+import os
+import json
+import time
+from pathlib import Path
+from dotenv import load_dotenv
+
+from livekit import agents, api
+from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.plugins import (
+    openai,
+    deepgram,
+    noise_cancellation,
+    silero,
+)
+from livekit.agents import llm
+from typing import Annotated, Optional
+
+# Load environment variables
+def load_environment() -> None:
+    """Load env files with project-local values taking precedence."""
+    root_dir = Path(__file__).resolve().parent
+    # Load broader/default files first, then override with local project env.
+    for env_path in (root_dir / "backend" / ".env.local", root_dir / ".env.local", root_dir / ".env"):
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+
+
+load_environment()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("outbound-agent")
+
+
+# TRUNK ID - This needs to be set after you crate your trunk
+# You can find this by running 'python setup_trunk.py --list' or checking LiveKit Dashboard
+OUTBOUND_TRUNK_ID = os.getenv("OUTBOUND_TRUNK_ID")
+
+
+def _normalize_domain(value: str | None) -> str | None:
+    """Normalize SIP URI/domain to plain host portion."""
+    if not value:
+        return None
+    domain = value.strip()
+    if domain.startswith("sip:"):
+        domain = domain[4:]
+    if "@" in domain:
+        domain = domain.split("@", 1)[1]
+    return domain.strip()
+
+
+# For SIP transfer destinations, prefer provider domain (VoBiz), not LiveKit SIP URI.
+SIP_DOMAIN = _normalize_domain(os.getenv("VOBIZ_SIP_DOMAIN") or os.getenv("LIVEKIT_SIP_URI"))
+
+
+def _is_trunk_id(value: str | None) -> bool:
+    return bool(value and value.startswith("ST_"))
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Invalid float for {name}='{raw}', using default {default}")
+        return default
+
+
+def _get_default_language() -> str:
+    return os.getenv("AGENT_DEFAULT_LANGUAGE", "hi").strip().lower() or "hi"
+
+
+def _repair_mojibake(value: str | None) -> str | None:
+    """Repair common UTF-8 text that was mis-decoded as latin-1/cp1252."""
+    if not value:
+        return value
+    text = value.strip()
+    if not text or ("à" not in text and "Ã" not in text):
+        return text
+    for encoding in ("latin-1", "cp1252"):
+        try:
+            repaired = text.encode(encoding).decode("utf-8")
+            if repaired:
+                return repaired
+        except UnicodeError:
+            continue
+    return text
+
+
+def _default_first_message(agent_name: str, company: str, language: str) -> str:
+    if language == "hi":
+        return f"Namaste, main {agent_name} {company} se bol rahi hoon. Kya aap mujhe sun pa rahe hain?"
+    return f"Hello, this is {agent_name} from {company}. Can you hear me?"
+
+
+def _default_reprompt(language: str) -> str:
+    if language == "hi":
+        return "Namaste, kya aap mujhe sun pa rahe hain?"
+    return "I am here. Can you hear me clearly?"
+
+
+def _safe_log_text(value: str, limit: int = 200) -> str:
+    """Escape unicode for Windows terminals that still default to cp1252."""
+    return value[:limit].encode("unicode_escape").decode("ascii")
+
+
+def _normalize_phone(value: str | None) -> str | None:
+    if not value:
+        return None
+    phone = value.strip().replace(" ", "").replace("-", "")
+    if not phone:
+        return None
+    if phone.startswith("+"):
+        return phone
+    return f"+{phone}"
+
+
+def _get_vobiz_trunk_config() -> tuple[str | None, str | None, str | None, str | None]:
+    """Return (sip_domain, auth_id, auth_token, caller_id) from env."""
+    sip_domain = _normalize_domain(os.getenv("VOBIZ_SIP_DOMAIN"))
+    auth_id = (os.getenv("VOBIZ_AUTH_ID") or os.getenv("VOBIZ_USERNAME") or "").strip() or None
+    auth_token = (os.getenv("VOBIZ_AUTH_TOKEN") or os.getenv("VOBIZ_PASSWORD") or "").strip() or None
+    caller_id = _normalize_phone(os.getenv("VOBIZ_CALLER_ID") or os.getenv("VOBIZ_OUTBOUND_NUMBER"))
+    return sip_domain, auth_id, auth_token, caller_id
+
+
+async def _ensure_outbound_trunk(ctx: agents.JobContext) -> str | None:
+    """
+    Find or create an outbound trunk using VoBiz credentials.
+    Returns a trunk ID (ST_...) when successful.
+    """
+    sip_domain, auth_id, auth_token, caller_id = _get_vobiz_trunk_config()
+    if not all([sip_domain, auth_id, auth_token, caller_id]):
+        logger.error(
+            "Cannot create outbound trunk. Missing one of: "
+            "VOBIZ_SIP_DOMAIN, VOBIZ_AUTH_ID/VOBIZ_USERNAME, "
+            "VOBIZ_AUTH_TOKEN/VOBIZ_PASSWORD, VOBIZ_CALLER_ID/VOBIZ_OUTBOUND_NUMBER."
+        )
+        return None
+
+    trunk_name = (os.getenv("VOBIZ_TRUNK_NAME") or "vobiz-outbound-auto").strip()
+
+    try:
+        trunks = await ctx.api.sip.list_outbound_trunk(api.ListSIPOutboundTrunkRequest())
+        for trunk in trunks.items:
+            matches_name = trunk.name == trunk_name
+            matches_address = getattr(trunk, "address", "") == sip_domain
+            matches_number = bool(getattr(trunk, "numbers", None) and caller_id in trunk.numbers)
+            if matches_name or (matches_address and matches_number):
+                try:
+                    updated = await ctx.api.sip.update_outbound_trunk_fields(
+                        trunk.sip_trunk_id,
+                        name=trunk_name,
+                        address=sip_domain,
+                        numbers=[caller_id],
+                        auth_username=auth_id,
+                        auth_password=auth_token,
+                    )
+                    logger.info(f"Synced existing outbound trunk from env: {trunk.sip_trunk_id}")
+                    return updated.sip_trunk_id
+                except Exception as e:
+                    logger.warning(f"Could not sync existing outbound trunk {trunk.sip_trunk_id}: {e}")
+                    logger.info(f"Using existing outbound trunk without sync: {trunk.sip_trunk_id}")
+                    return trunk.sip_trunk_id
+    except Exception as e:
+        logger.warning(f"Could not list outbound trunks before create: {e}")
+
+    try:
+        created = await ctx.api.sip.create_sip_outbound_trunk(
+            api.CreateSIPOutboundTrunkRequest(
+                trunk=api.SIPOutboundTrunkInfo(
+                    name=trunk_name,
+                    address=sip_domain,
+                    numbers=[caller_id],
+                    auth_username=auth_id,
+                    auth_password=auth_token,
+                )
+            )
+        )
+        logger.info(f"Created outbound trunk: {created.sip_trunk_id}")
+        return created.sip_trunk_id
+    except Exception as e:
+        logger.error(f"Failed to create outbound trunk automatically: {e}")
+        return None
+
+
+async def _resolve_outbound_trunk_id(ctx: agents.JobContext, configured: str | None) -> str | None:
+    """
+    Resolve an outbound trunk ID. Supports:
+    1) Direct trunk id (ST_xxx)
+    2) Trunk name
+    3) Auto-match by caller number
+    4) Fallback to first available outbound trunk
+    """
+    if _is_trunk_id(configured):
+        return configured
+
+    requested = (configured or "").strip()
+    caller_number = os.getenv("VOBIZ_CALLER_ID") or os.getenv("VOBIZ_OUTBOUND_NUMBER")
+
+    try:
+        trunks = await ctx.api.sip.list_outbound_trunk(api.ListSIPOutboundTrunkRequest())
+    except Exception as e:
+        logger.error(f"Failed to list outbound trunks: {e}")
+        return configured
+
+    if not trunks.items:
+        return await _ensure_outbound_trunk(ctx)
+
+    # 1) Match by trunk id/name when non-ST value is provided
+    if requested:
+        for trunk in trunks.items:
+            if trunk.sip_trunk_id == requested or trunk.name == requested:
+                logger.info(f"Resolved outbound trunk '{requested}' -> {trunk.sip_trunk_id}")
+                return await _ensure_outbound_trunk(ctx)
+
+    # 2) Match by caller number
+    if caller_number:
+        for trunk in trunks.items:
+            if getattr(trunk, "numbers", None) and caller_number in trunk.numbers:
+                logger.info(f"Resolved outbound trunk by caller number {caller_number} -> {trunk.sip_trunk_id}")
+                return await _ensure_outbound_trunk(ctx)
+
+    # 3) Try to create/fetch trunk using VoBiz credentials
+    created_or_found = await _ensure_outbound_trunk(ctx)
+    if _is_trunk_id(created_or_found):
+        return created_or_found
+
+    # 4) Fallback to first configured trunk
+    fallback = trunks.items[0].sip_trunk_id
+    logger.warning(f"Using fallback outbound trunk: {fallback}")
+    return fallback
+
+
+def _build_tts():
+    """Configure the Text-to-Speech provider based on env vars."""
+    provider = os.getenv("TTS_PROVIDER", "openai").lower()
+    
+    if provider == "cartesia":
+        try:
+            from livekit.plugins import cartesia
+            logger.info("Using Cartesia TTS")
+            model = os.getenv("CARTESIA_TTS_MODEL", "sonic-2")
+            voice = os.getenv("CARTESIA_TTS_VOICE", "f786b574-daa5-4673-aa0c-cbe3e8534c02")
+            return cartesia.TTS(model=model, voice=voice)
+        except ImportError:
+            logger.warning("Cartesia plugin not installed. Falling back to OpenAI TTS.")
+    
+    # Default to OpenAI
+    logger.info("Using OpenAI TTS")
+    model = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+    voice = os.getenv("OPENAI_TTS_VOICE", "alloy")
+    speed = _get_float_env("OPENAI_TTS_SPEED", 1.05)
+    return openai.TTS(model=model, voice=voice, speed=speed)
+
+
+def _build_stt():
+    """Configure Speech-to-Text provider with safe fallback."""
+    provider = os.getenv("STT_PROVIDER", "deepgram").lower()
+    default_language = _get_default_language()
+
+    if provider == "deepgram":
+        if os.getenv("DEEPGRAM_API_KEY"):
+            model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
+            language = os.getenv("DEEPGRAM_STT_LANGUAGE", "").strip() or ("hi" if default_language == "hi" else "multi")
+            logger.info("Using Deepgram STT")
+            return deepgram.STT(model=model, language=language)
+
+        logger.warning("DEEPGRAM_API_KEY is missing. Falling back to OpenAI STT.")
+
+    # Default/fallback: OpenAI STT
+    model = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
+    language = os.getenv("OPENAI_STT_LANGUAGE", "").strip() or default_language
+    logger.info(f"Using OpenAI STT (language={language or 'auto'})")
+    if language:
+        return openai.STT(model=model, language=language)
+    return openai.STT(model=model)
+
+
+def _build_vad():
+    """Low-latency VAD tuning for telephony calls."""
+    return silero.VAD.load(
+        min_speech_duration=_get_float_env("VAD_MIN_SPEECH_DURATION", 0.04),
+        min_silence_duration=_get_float_env("VAD_MIN_SILENCE_DURATION", 0.25),
+        prefix_padding_duration=_get_float_env("VAD_PREFIX_PADDING_DURATION", 0.25),
+        activation_threshold=_get_float_env("VAD_ACTIVATION_THRESHOLD", 0.35),
+        sample_rate=16000,
+    )
+
+
+
+class TransferFunctions(llm.ToolContext):
+    def __init__(self, ctx: agents.JobContext, phone_number: str = None):
+        super().__init__(tools=[])
+        self.ctx = ctx
+        self.phone_number = phone_number
+        self.last_user_utterance: str = ""
+        self._confirm_pending: bool = False
+        self._confirm_requested_at: float = 0.0
+        self._pending_destination: Optional[str] = None
+        self._last_transfer_ts: float = 0.0
+
+    def set_last_user_utterance(self, text: str) -> None:
+        if text:
+            self.last_user_utterance = text.strip()
+
+    def _normalize_text(self, text: str) -> str:
+        cleaned = "".join(ch.lower() if (ch.isalnum() or ch.isspace()) else " " for ch in (text or ""))
+        return " ".join(cleaned.split())
+
+    def _has_transfer_intent(self, text: str) -> bool:
+        t = self._normalize_text(text)
+        if len(t) < 5:
+            return False
+        keywords = (
+            "transfer",
+            "transfer karo",
+            "connect to agent",
+            "connect me",
+            "live agent",
+            "human agent",
+            "forward call",
+            "speak to agent",
+            "talk to agent",
+            "customer care",
+            "agent se baat",
+            "agent se connect",
+            "call transfer",
+            "ट्रांसफर",
+            "एजेंट से बात",
+            "एजेंट से कनेक्ट",
+            "कस्टमर केयर",
+            "मानव एजेंट",
+        )
+        return any(k in t for k in keywords)
+
+    def _has_transfer_confirmation(self, text: str) -> bool:
+        t = self._normalize_text(text)
+        confirm_words = (
+            "yes",
+            "yes transfer",
+            "yes please",
+            "confirm",
+            "confirm transfer",
+            "please transfer",
+            "go ahead",
+            "go ahead transfer",
+            "transfer now",
+            "do it",
+            "haan",
+            "ha",
+            "haan transfer",
+            "transfer karo",
+            "kar do",
+            "कर दो",
+            "हाँ",
+            "हाँ ट्रांसफर",
+            "ट्रांसफर करो",
+        )
+        return any(k in t for k in confirm_words)
+
+    @llm.function_tool(description="Transfer the call to a human support agent or another phone number.")
+    async def transfer_call(self, destination: Optional[str] = None):
+        """
+        Transfer the call.
+        """
+        now = time.time()
+        if now - self._last_transfer_ts < 8:
+            return "Transfer request ignored because a transfer was just attempted."
+
+        user_text = (self.last_user_utterance or "").strip()
+        require_confirm = os.getenv("TRANSFER_REQUIRE_CONFIRMATION", "true").lower() == "true"
+        confirm_timeout = _get_float_env("TRANSFER_CONFIRM_TIMEOUT_SEC", 30.0)
+
+        logger.info(
+            "transfer_call invoked: user_text=%r, destination=%r, confirm_pending=%s",
+            user_text,
+            destination,
+            self._confirm_pending,
+        )
+
+        # Expire stale confirmations.
+        if self._confirm_pending and (now - self._confirm_requested_at > confirm_timeout):
+            self._confirm_pending = False
+            self._pending_destination = None
+
+        # Step 1: detect intent only. Never transfer in this first step.
+        if not self._confirm_pending:
+            if not self._has_transfer_intent(user_text):
+                return "Transfer ignored because caller did not explicitly request transfer."
+            self._confirm_pending = True
+            self._confirm_requested_at = now
+            self._pending_destination = destination or os.getenv("DEFAULT_TRANSFER_NUMBER")
+            return "I can transfer your call. Please confirm by saying: yes, transfer me."
+
+        # Step 2: pending confirmation must be explicitly confirmed.
+        if require_confirm and not self._has_transfer_confirmation(user_text):
+            return "Please confirm transfer by saying: yes, transfer me."
+
+        destination = destination or self._pending_destination or os.getenv("DEFAULT_TRANSFER_NUMBER")
+        if not destination:
+            self._confirm_pending = False
+            self._pending_destination = None
+            return "Error: No default transfer number configured."
+
+        self._confirm_pending = False
+        self._pending_destination = None
+        if "@" not in destination:
+            # If no domain is provided, append the SIP domain
+            if SIP_DOMAIN:
+                # Ensure clean number (strip tel: or sip: prefix if present but no domain)
+                clean_dest = destination.replace("tel:", "").replace("sip:", "")
+                destination = f"sip:{clean_dest}@{SIP_DOMAIN}"
+            else:
+                # Fallback to tel URI if no domain configured
+                if not destination.startswith("tel:") and not destination.startswith("sip:"):
+                     destination = f"tel:{destination}"
+        elif not destination.startswith("sip:"):
+             destination = f"sip:{destination}"
+        
+        logger.info(f"Transferring call to {destination}")
+        
+        # Determine the participant identity
+        # For outbound calls initiated by this agent, the participant identity is typically "sip_<phone_number>"
+        # For inbound, we might need to find the remote participant.
+        participant_identity = None
+        
+        # If we stored the phone number from metadata, we can construct the identity
+        if self.phone_number:
+            participant_identity = f"sip_{self.phone_number}"
+        else:
+            # Try to find a participant that is NOT the agent
+            for p in self.ctx.room.remote_participants.values():
+                participant_identity = p.identity
+                break
+        
+        if not participant_identity:
+            logger.error("Could not determine participant identity for transfer")
+            return "Failed to transfer: could not identify the caller."
+
+        try:
+            logger.info(f"Transferring participant {participant_identity} to {destination}")
+            await self.ctx.api.sip.transfer_sip_participant(
+                api.TransferSIPParticipantRequest(
+                    room_name=self.ctx.room.name,
+                    participant_identity=participant_identity,
+                    transfer_to=destination,
+                    play_dialtone=False
+                )
+            )
+            self._last_transfer_ts = time.time()
+            return "Transfer initiated successfully."
+        except Exception as e:
+            logger.error(f"Transfer failed: {e}")
+            return f"Error executing transfer: {e}"
+
+
+class OutboundAssistant(Agent):
+
+    """
+    An AI agent tailored for outbound calls.
+    Attempts to be helpful and concise.
+    """
+    def __init__(self) -> None:
+        agent_name = os.getenv("AGENT_PERSONA_NAME", "Shubhi")
+        company = os.getenv("AGENT_COMPANY_NAME", "real estate company")
+        default_language = os.getenv("AGENT_DEFAULT_LANGUAGE", "hi").strip().lower()
+        language_instruction = (
+            "Primary language is Hindi. Reply in simple Hindi by default. "
+            "If the caller speaks English, switch to English. If mixed, use Hinglish."
+            if default_language == "hi"
+            else "Primary language is English. If the caller speaks Hindi, switch to Hindi."
+        )
+        super().__init__(
+            instructions=f"""
+            You are {agent_name}, a helpful and professional voice agent from {company}.
+            {language_instruction}
+            
+            Key behaviors:
+            1. Introduce yourself as {agent_name} from {company} when the user answers.
+            2. Be concise and respectful of the user's time.
+            2a. Keep every reply short (about 6-14 words) unless asked for detail.
+            3. Keep conversation focused on real-estate context (property, site visit, budget, location, timeline).
+            4. Use transfer_call ONLY when user clearly asks transfer (word must include "transfer" or "live agent").
+            5. Never trigger transfer from partial/unclear words.
+            6. If transfer intent is unclear, ask a clarification question instead of calling transfer_call.
+            7. Never call transfer_call on one-word or noisy utterances.
+            """
+        )
+
+
+async def entrypoint(ctx: agents.JobContext):
+    """
+    Main entrypoint for the agent.
+    
+    For outbound calls:
+    1. Checks for 'phone_number' in the job metadata.
+    2. Connects to the room.
+    3. Initiates the SIP call to the phone number.
+    4. Waits for answer before speaking.
+    """
+    logger.info(f"Connecting to room: {ctx.room.name}")
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_key:
+        logger.error("OPENAI_API_KEY is missing in environment. Cannot start outbound conversation.")
+        ctx.shutdown()
+        return
+    if openai_key.startswith("sk-or-v1"):
+        logger.error(
+            "Detected OpenRouter key in OPENAI_API_KEY. "
+            "Please set a real OpenAI key (sk-... / sk-proj-...) in .env."
+        )
+        ctx.shutdown()
+        return
+    
+    # parse the phone number from the metadata sent by the dispatch script
+    phone_number = None
+    try:
+        if ctx.job.metadata:
+            data = json.loads(ctx.job.metadata)
+            phone_number = data.get("phone_number")
+    except Exception:
+        logger.warning("No valid JSON metadata found. This might be an inbound call.")
+
+    # Initialize function context
+    fnc_ctx = TransferFunctions(ctx, phone_number)
+    last_user_speech_at = time.time()
+    reprompt_task: asyncio.Task | None = None
+
+    # Initialize the Agent Session with plugins
+
+    session = AgentSession(
+        stt=_build_stt(),
+        vad=_build_vad(),
+        llm=openai.LLM(model=os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")),
+        tts=_build_tts(),
+        tools=fnc_ctx.flatten(),
+        allow_interruptions=True,
+        min_interruption_duration=_get_float_env("SESSION_MIN_INTERRUPTION_DURATION", 0.15),
+        min_endpointing_delay=_get_float_env("SESSION_MIN_ENDPOINTING_DELAY", 0.25),
+        max_endpointing_delay=_get_float_env("SESSION_MAX_ENDPOINTING_DELAY", 0.90),
+        false_interruption_timeout=_get_float_env("SESSION_FALSE_INTERRUPTION_TIMEOUT", 0.70),
+        preemptive_generation=os.getenv("SESSION_PREEMPTIVE_GENERATION", "true").lower() == "true",
+    )
+
+    # Start the session
+    await session.start(
+        room=ctx.room,
+        agent=OutboundAssistant(),
+        room_input_options=RoomInputOptions(
+            noise_cancellation=(
+                noise_cancellation.BVCTelephony()
+                if os.getenv("ENABLE_NOISE_CANCELLATION", "false").lower() == "true"
+                else None
+            ),
+            close_on_disconnect=True, # Close room when agent disconnects
+        ),
+    )
+
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev) -> None:
+        nonlocal last_user_speech_at, reprompt_task
+        transcript = (getattr(ev, "transcript", "") or "").strip()
+        if not transcript:
+            return
+        last_user_speech_at = time.time()
+        if reprompt_task and not reprompt_task.done():
+            reprompt_task.cancel()
+            reprompt_task = None
+        logger.info(
+            "user_input_transcribed final=%s language=%s text=\"%s\"",
+            getattr(ev, "is_final", False),
+            getattr(ev, "language", None),
+            _safe_log_text(transcript),
+        )
+        if getattr(ev, "is_final", False):
+            fnc_ctx.set_last_user_utterance(transcript)
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item_added(ev) -> None:
+        item = getattr(ev, "item", None)
+        if item is None:
+            return
+        role = getattr(item, "role", "unknown")
+        raw_content = getattr(item, "content", [])
+        parts: list[str] = []
+        if isinstance(raw_content, list):
+            for part in raw_content:
+                if isinstance(part, str):
+                    parts.append(part)
+                else:
+                    transcript = getattr(part, "transcript", None)
+                    if transcript:
+                        parts.append(transcript)
+        elif isinstance(raw_content, str):
+            parts.append(raw_content)
+        text = " ".join(parts).strip()
+        if text:
+            logger.info("conversation_item_added role=%s text=\"%s\"", role, _safe_log_text(text))
+
+    async def _reprompt_if_no_speech() -> None:
+        """If caller stays silent/no transcript arrives, send a short reprompt."""
+        delay = _get_float_env("NO_SPEECH_REPROMPT_SEC", 10.0)
+        reprompt_text = _default_reprompt(_get_default_language())
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                if time.time() - last_user_speech_at < delay:
+                    continue
+                await session.say(
+                    reprompt_text,
+                    allow_interruptions=True,
+                    add_to_chat_ctx=True,
+                )
+                logger.info("No user speech detected; reprompt sent.")
+                break
+        except asyncio.CancelledError:
+            logger.debug("No-speech reprompt cancelled because user spoke.")
+        except Exception as reprompt_error:
+            logger.debug(f"No-speech reprompt skipped: {reprompt_error}")
+
+    if phone_number:
+        logger.info(f"Initiating outbound SIP call to {phone_number}...")
+        try:
+            trunk_id = await _resolve_outbound_trunk_id(ctx, OUTBOUND_TRUNK_ID)
+            if not _is_trunk_id(trunk_id):
+                logger.error(
+                    "No valid outbound trunk ID found. Set OUTBOUND_TRUNK_ID=ST_xxx in env. "
+                    "LIVEKIT_SIP_URI/sip:... is not a trunk ID."
+                )
+                ctx.shutdown()
+                return
+            # Create a SIP participant to dial out
+            # This effectively "calls" the phone number and brings them into this room
+            await ctx.api.sip.create_sip_participant(
+                api.CreateSIPParticipantRequest(
+                    room_name=ctx.room.name,
+                    sip_trunk_id=trunk_id,
+                    sip_call_to=phone_number,
+                    participant_identity=f"sip_{phone_number}", # Unique ID for the SIP user
+                    wait_until_answered=True, # Important: Wait for pickup before continuing
+                )
+            )
+            logger.info("Call answered! Agent is now listening.")
+
+            # Speak first so outbound calls do not stay silent.
+            agent_name = os.getenv("AGENT_PERSONA_NAME", "Shubhi")
+            company = os.getenv("AGENT_COMPANY_NAME", "Estate Company")
+            default_language = _get_default_language()
+            first_message = _repair_mojibake(os.getenv("OUTBOUND_FIRST_MESSAGE")) or _default_first_message(
+                agent_name,
+                company,
+                default_language,
+            )
+            try:
+                await session.say(
+                    first_message,
+                    allow_interruptions=True,
+                    add_to_chat_ctx=True,
+                )
+                logger.info("Initial greeting sent.")
+                reprompt_task = asyncio.create_task(_reprompt_if_no_speech())
+            except Exception as greet_error:
+                logger.warning(f"Failed to send initial greeting: {greet_error}")
+            
+        except Exception as e:
+            logger.error(f"Failed to place outbound call: {e}")
+            # Ensure we clean up if the call fails
+            ctx.shutdown()
+    else:
+        # Fallback for inbound calls (if this agent is used for that)
+        logger.info("No phone number in metadata. Treating as inbound/web call.")
+        await session.generate_reply(instructions="Greet the user.")
+
+
+if __name__ == "__main__":
+    # The agent name "outbound-caller" is used by the dispatch script to find this worker
+    agents.cli.run_app(
+        agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            agent_name="outbound-caller", 
+        )
+    )
