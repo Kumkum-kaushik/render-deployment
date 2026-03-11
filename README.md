@@ -11,7 +11,7 @@ This root-level setup is the fastest way to run the agent in this repository. It
 - transfer to a default or spoken destination number
 - calling any valid target number from the CLI
 
-> This repository also contains a larger backend/frontend platform under `backend/` and `frontend/`. You do not need that stack to use the standalone flow documented here.
+> This repository also contains a larger backend microservices platform under `backend/`. You do not need that stack to use the standalone flow documented here.
 
 ## At A Glance
 
@@ -228,7 +228,6 @@ If you are only using the standalone root scripts, these can stay unset or place
 - `JWT_*`
 - `INTERNAL_API_KEY`
 - `AWS_*`
-- `VITE_API_URL`
 
 ## Important Vobiz Notes
 
@@ -308,7 +307,6 @@ Those mean:
 |-- setup_inbound.py
 |-- transfer_call.md
 |-- backend/
-|-- frontend/
 |-- docs/
 `-- scripts/
 ```

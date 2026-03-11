@@ -17,7 +17,7 @@ from livekit.plugins import (
     silero,
 )
 from livekit.agents import llm
-from typing import Annotated, Optional
+from typing import Optional
 
 # Load environment variables
 def load_environment() -> None:

@@ -273,7 +273,7 @@ async def entrypoint(ctx: agents.JobContext):
         "temperature": 0.8,
         # Realtime mode
         "realtime_provider": "openai",
-        "realtime_model": "gpt-4o-realtime-preview",
+        "realtime_model": "gpt-realtime-mini",
         # Pipeline mode (STT → LLM → TTS)
         "stt_provider": "deepgram",
         "stt_model": "nova-2",
@@ -442,7 +442,9 @@ async def entrypoint(ctx: agents.JobContext):
             # Trigger post-call analysis via Analytics Service (direct call to dedicated service)
             try:
                 # Call Analytics Service directly (not via Gateway) for proper microservice separation
-                API_URL = "http://analytics:8001"  # Analytics container
+                API_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://analytics:8001").strip()
+                if "://" not in API_URL:
+                    API_URL = f"http://{API_URL.rstrip('/')}"
                 INTERNAL_KEY = os.getenv("INTERNAL_API_KEY", "vobiz_internal_secret_key_123")
                 
                 start_time = datetime.now()

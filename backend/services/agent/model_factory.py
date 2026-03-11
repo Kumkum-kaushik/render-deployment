@@ -200,7 +200,7 @@ def get_realtime_model(voice_config: dict) -> Any:
 
 
 def get_available_providers() -> dict:
-    """Return dictionary of available providers for frontend."""
+    """Return dictionary of available providers for client applications."""
     return {
         "stt": ["openai"] + ([p for p in ["deepgram", "assemblyai"] if AVAILABLE_PLUGINS.get(p)]),
         "llm": ["openai"] + ([p for p in ["anthropic", "google", "groq"] if AVAILABLE_PLUGINS.get(p)]),

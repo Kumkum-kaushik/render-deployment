@@ -57,7 +57,6 @@ docker-compose up -d --build
 
 This starts:
 - **Gateway** (http://localhost:8000) - API entry point
-- **Frontend** (http://localhost:3000) - Dashboard
 - **Config Service** (Port 8002) - Configuration management
 - **Analytics Service** (Port 8001) - Call analytics
 - **Orchestration Service** (Port 8003) - Campaign management
