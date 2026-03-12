@@ -108,6 +108,28 @@ def _get_realtime_provider() -> str:
     return os.getenv("REALTIME_PROVIDER", "openai").strip().lower() or "openai"
 
 
+def _validate_runtime_provider_keys(realtime_audio: bool) -> bool:
+    provider = _get_realtime_provider()
+    if realtime_audio and provider == "google":
+        google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+        if not google_key:
+            logger.error("GOOGLE_API_KEY is missing in environment. Cannot start Gemini Live conversation.")
+            return False
+        return True
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_key:
+        logger.error("OPENAI_API_KEY is missing in environment. Cannot start outbound conversation.")
+        return False
+    if openai_key.startswith("sk-or-v1"):
+        logger.error(
+            "Detected OpenRouter key in OPENAI_API_KEY. "
+            "Please set a real OpenAI key (sk-... / sk-proj-...) in .env."
+        )
+        return False
+    return True
+
+
 def _repair_mojibake(value: str | None) -> str | None:
     """Repair common UTF-8 text that was mis-decoded as latin-1/cp1252."""
     if not value:
@@ -666,19 +688,6 @@ async def entrypoint(ctx: agents.JobContext):
     4. Waits for answer before speaking.
     """
     logger.info(f"Connecting to room: {ctx.room.name}")
-
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not openai_key:
-        logger.error("OPENAI_API_KEY is missing in environment. Cannot start outbound conversation.")
-        ctx.shutdown()
-        return
-    if openai_key.startswith("sk-or-v1"):
-        logger.error(
-            "Detected OpenRouter key in OPENAI_API_KEY. "
-            "Please set a real OpenAI key (sk-... / sk-proj-...) in .env."
-        )
-        ctx.shutdown()
-        return
     
     # parse the phone number from the metadata sent by the dispatch script
     phone_number = None
@@ -694,6 +703,9 @@ async def entrypoint(ctx: agents.JobContext):
     last_user_speech_at = time.time()
     reprompt_task: asyncio.Task | None = None
     realtime_audio = _use_realtime_audio()
+    if not _validate_runtime_provider_keys(realtime_audio):
+        ctx.shutdown()
+        return
 
     # Initialize the Agent Session with plugins
     if realtime_audio:
