@@ -9,7 +9,11 @@ import redis.asyncio as redis
 logger = logging.getLogger("config-service.cache")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+<<<<<<< HEAD
 CACHE_TTL = int(os.getenv("CACHE_TTL", "900"))  # 15 minutes default (was 5)
+=======
+CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))  # 5 minutes default
+>>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 
 
 class RedisCache:
@@ -19,6 +23,7 @@ class RedisCache:
     
     @classmethod
     async def connect(cls):
+<<<<<<< HEAD
         """Connect to Redis with a bounded connection pool."""
         if cls._client is None:
             cls._client = redis.from_url(
@@ -29,6 +34,11 @@ class RedisCache:
                 socket_timeout=2,
                 retry_on_timeout=True,
             )
+=======
+        """Connect to Redis."""
+        if cls._client is None:
+            cls._client = redis.from_url(REDIS_URL, decode_responses=True)
+>>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
             logger.info(f"Connected to Redis: {REDIS_URL}")
     
     @classmethod

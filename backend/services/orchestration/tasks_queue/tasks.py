@@ -3,7 +3,10 @@ Celery tasks for campaign execution.
 """
 import logging
 import asyncio
+<<<<<<< HEAD
 import threading
+=======
+>>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -12,6 +15,7 @@ from .celery_app import celery_app
 
 logger = logging.getLogger("queue.tasks")
 
+<<<<<<< HEAD
 # Reuse one event loop per Celery worker thread instead of creating and
 # destroying a new loop for every task.  Creating/closing an event loop
 # carries ~5-20 ms of overhead and also prevents long-lived connection pools
@@ -27,6 +31,16 @@ def run_async(coro):
         asyncio.set_event_loop(loop)
         _thread_local.loop = loop
     return loop.run_until_complete(coro)
+=======
+
+def run_async(coro):
+    """Helper to run async code in sync context."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+>>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 
 
 @celery_app.task(
