@@ -3,10 +3,7 @@ import logging
 import os
 import json
 import time
-<<<<<<< HEAD
-import threading
-=======
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
+
 from pathlib import Path
 from dotenv import load_dotenv
 from openai.types.beta.realtime.session import InputAudioTranscription, TurnDetection
@@ -24,10 +21,6 @@ from livekit.plugins import (
 from livekit.agents import llm
 from typing import Optional
 
-<<<<<<< HEAD
-
-=======
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 # Load environment variables
 def load_environment() -> None:
     """Load env files with project-local values taking precedence."""
@@ -49,15 +42,7 @@ logger = logging.getLogger("outbound-agent")
 # You can find this by running 'python setup_trunk.py --list' or checking LiveKit Dashboard
 OUTBOUND_TRUNK_ID = os.getenv("OUTBOUND_TRUNK_ID")
 
-<<<<<<< HEAD
-# In-process trunk ID cache — trunks rarely change, so we avoid a LiveKit API
-# round-trip (100-300 ms) on every call by caching the resolved trunk ID for 1 hour.
-_trunk_cache: dict[str, tuple[str, float]] = {}
-_TRUNK_CACHE_TTL = float(os.getenv("TRUNK_CACHE_TTL_SEC", "3600"))
-_trunk_cache_lock = threading.Lock()
 
-=======
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 
 def _normalize_domain(value: str | None) -> str | None:
     """Normalize SIP URI/domain to plain host portion."""
@@ -125,22 +110,14 @@ def _get_realtime_provider() -> str:
     return os.getenv("REALTIME_PROVIDER", "openai").strip().lower() or "openai"
 
 
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 def _get_realtime_language_code() -> str:
     language = _get_default_language()
     return {
         "hi": "hi-IN",
         "en": "en-US",
     }.get(language, language)
-<<<<<<< HEAD
 
 
-=======
-=======
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 def _validate_runtime_provider_keys(realtime_audio: bool) -> bool:
     provider = _get_realtime_provider()
     if realtime_audio and provider == "google":
@@ -161,10 +138,6 @@ def _validate_runtime_provider_keys(realtime_audio: bool) -> bool:
         )
         return False
     return True
-<<<<<<< HEAD
-=======
->>>>>>> 242873f8d3b37699d23ce567dadb7d39587d30bf
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 
 
 def _repair_mojibake(value: str | None) -> str | None:
@@ -288,31 +261,12 @@ async def _resolve_outbound_trunk_id(ctx: agents.JobContext, configured: str | N
     2) Trunk name
     3) Auto-match by caller number
     4) Fallback to first available outbound trunk
-<<<<<<< HEAD
-
-    Results are cached in-process for TRUNK_CACHE_TTL_SEC (default 1 hour)
-    to avoid a LiveKit API round-trip on every call.
-=======
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
     """
     if _is_trunk_id(configured):
         return configured
 
-<<<<<<< HEAD
-    caller_number = os.getenv("VOBIZ_CALLER_ID") or os.getenv("VOBIZ_OUTBOUND_NUMBER")
-    cache_key = f"{configured or ''}:{caller_number or ''}"
-
-    with _trunk_cache_lock:
-        cached = _trunk_cache.get(cache_key)
-        if cached and (time.time() - cached[1]) < _TRUNK_CACHE_TTL:
-            logger.debug(f"Trunk cache hit for key '{cache_key}': {cached[0]}")
-            return cached[0]
-
-    requested = (configured or "").strip()
-=======
     requested = (configured or "").strip()
     caller_number = os.getenv("VOBIZ_CALLER_ID") or os.getenv("VOBIZ_OUTBOUND_NUMBER")
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 
     try:
         trunks = await ctx.api.sip.list_outbound_trunk(api.ListSIPOutboundTrunkRequest())
@@ -320,43 +274,6 @@ async def _resolve_outbound_trunk_id(ctx: agents.JobContext, configured: str | N
         logger.error(f"Failed to list outbound trunks: {e}")
         return configured
 
-<<<<<<< HEAD
-    trunk_id: str | None = None
-
-    if not trunks.items:
-        trunk_id = await _ensure_outbound_trunk(ctx)
-    elif requested:
-        # 1) Match by trunk id/name when non-ST value is provided
-        for trunk in trunks.items:
-            if trunk.sip_trunk_id == requested or trunk.name == requested:
-                logger.info(f"Resolved outbound trunk '{requested}' -> {trunk.sip_trunk_id}")
-                trunk_id = await _ensure_outbound_trunk(ctx)
-                break
-    if trunk_id is None and caller_number:
-        # 2) Match by caller number
-        for trunk in trunks.items:
-            if getattr(trunk, "numbers", None) and caller_number in trunk.numbers:
-                logger.info(f"Resolved outbound trunk by caller number {caller_number} -> {trunk.sip_trunk_id}")
-                trunk_id = await _ensure_outbound_trunk(ctx)
-                break
-
-    if trunk_id is None:
-        # 3) Try to create/fetch trunk using VoBiz credentials
-        created_or_found = await _ensure_outbound_trunk(ctx)
-        if _is_trunk_id(created_or_found):
-            trunk_id = created_or_found
-
-    if trunk_id is None and trunks.items:
-        # 4) Fallback to first configured trunk
-        trunk_id = trunks.items[0].sip_trunk_id
-        logger.warning(f"Using fallback outbound trunk: {trunk_id}")
-
-    if trunk_id:
-        with _trunk_cache_lock:
-            _trunk_cache[cache_key] = (trunk_id, time.time())
-
-    return trunk_id
-=======
     if not trunks.items:
         return await _ensure_outbound_trunk(ctx)
 
@@ -383,17 +300,11 @@ async def _resolve_outbound_trunk_id(ctx: agents.JobContext, configured: str | N
     fallback = trunks.items[0].sip_trunk_id
     logger.warning(f"Using fallback outbound trunk: {fallback}")
     return fallback
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 
 
 def _build_tts():
     """Configure the Text-to-Speech provider based on env vars."""
     provider = os.getenv("TTS_PROVIDER", "openai").lower()
-<<<<<<< HEAD
-
-=======
-    
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
     if provider == "cartesia":
         try:
             from livekit.plugins import cartesia
@@ -403,11 +314,6 @@ def _build_tts():
             return cartesia.TTS(model=model, voice=voice)
         except ImportError:
             logger.warning("Cartesia plugin not installed. Falling back to OpenAI TTS.")
-<<<<<<< HEAD
-
-=======
-    
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
     # Default to OpenAI
     logger.info("Using OpenAI TTS")
     model = os.getenv("OPENAI_TTS_MODEL", "tts-1")
@@ -474,82 +380,7 @@ def _build_stt():
     return openai.STT(**stt_kwargs)
 
 
-<<<<<<< HEAD
-=======
-def _build_realtime_llm():
-    """Configure realtime audio provider for lower-latency voice output."""
-    if _get_realtime_provider() == "google":
-        model = os.getenv("GOOGLE_REALTIME_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
-        voice = os.getenv("GOOGLE_REALTIME_VOICE", "Puck")
-        logger.info(
-            "Using Gemini Live audio (model=%s voice=%s language=%s)",
-            model,
-            voice,
-<<<<<<< HEAD
-            _get_realtime_language_code(),
-=======
-            _get_default_language(),
->>>>>>> 242873f8d3b37699d23ce567dadb7d39587d30bf
-        )
-        return google.realtime.RealtimeModel(
-            model=model,
-            voice=voice,
-<<<<<<< HEAD
-            language=_get_realtime_language_code(),
-=======
->>>>>>> 242873f8d3b37699d23ce567dadb7d39587d30bf
-            temperature=_get_float_env("OPENAI_REALTIME_TEMPERATURE", 0.8),
-            instructions=_build_agent_instructions(),
-        )
 
-    model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")
-    voice = os.getenv("OPENAI_REALTIME_VOICE", "marin")
-    speed = _get_float_env("OPENAI_REALTIME_SPEED", 1.0)
-    transcription_model = os.getenv("OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
-    transcription_language = os.getenv("OPENAI_REALTIME_TRANSCRIBE_LANGUAGE", "").strip() or _get_default_language()
-    noise_reduction = os.getenv("OPENAI_REALTIME_INPUT_NOISE_REDUCTION", "near_field").strip() or None
-    turn_detection = TurnDetection(
-        type="server_vad",
-        threshold=_get_float_env("OPENAI_REALTIME_TURN_THRESHOLD", 0.40),
-        prefix_padding_ms=_get_int_env("OPENAI_REALTIME_PREFIX_PADDING_MS", 220),
-        silence_duration_ms=_get_int_env("OPENAI_REALTIME_SILENCE_DURATION_MS", 180),
-        create_response=True,
-    )
-    input_audio_transcription = InputAudioTranscription(
-        model=transcription_model,
-        language=transcription_language,
-    )
-    logger.info(
-        "Using OpenAI Realtime audio (model=%s voice=%s language=%s speed=%.2f)",
-        model,
-        voice,
-        transcription_language or "auto",
-        speed,
-    )
-    return openai.realtime.RealtimeModel(
-        model=model,
-        voice=voice,
-        modalities=["text", "audio"],
-        speed=speed,
-        input_audio_transcription=input_audio_transcription,
-        input_audio_noise_reduction=noise_reduction,
-        turn_detection=turn_detection,
-    )
-
-
-def _build_vad():
-    """Low-latency VAD tuning for telephony calls."""
-    return silero.VAD.load(
-        min_speech_duration=_get_float_env("VAD_MIN_SPEECH_DURATION", 0.04),
-        min_silence_duration=_get_float_env("VAD_MIN_SILENCE_DURATION", 0.25),
-        prefix_padding_duration=_get_float_env("VAD_PREFIX_PADDING_DURATION", 0.25),
-        activation_threshold=_get_float_env("VAD_ACTIVATION_THRESHOLD", 0.35),
-        sample_rate=16000,
-    )
-
-
-
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 def _build_agent_instructions() -> str:
     agent_name = os.getenv("AGENT_PERSONA_NAME", "Shubhi")
     company = os.getenv("AGENT_COMPANY_NAME", "real estate company")
@@ -582,7 +413,6 @@ def _build_agent_instructions() -> str:
             """
 
 
-<<<<<<< HEAD
 def _build_realtime_llm():
     """Configure realtime audio provider for lower-latency voice output."""
     if _get_realtime_provider() == "google":
@@ -648,8 +478,6 @@ def _build_vad():
     )
 
 
-=======
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
 class TransferFunctions(llm.ToolContext):
     def __init__(self, ctx: agents.JobContext, phone_number: str = None):
         super().__init__(tools=[])
@@ -775,30 +603,18 @@ class TransferFunctions(llm.ToolContext):
             else:
                 # Fallback to tel URI if no domain configured
                 if not destination.startswith("tel:") and not destination.startswith("sip:"):
-<<<<<<< HEAD
                     destination = f"tel:{destination}"
         elif not destination.startswith("sip:"):
             destination = f"sip:{destination}"
 
         logger.info(f"Transferring call to {destination}")
 
-=======
-                     destination = f"tel:{destination}"
-        elif not destination.startswith("sip:"):
-             destination = f"sip:{destination}"
-        
-        logger.info(f"Transferring call to {destination}")
-        
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
+
         # Determine the participant identity
         # For outbound calls initiated by this agent, the participant identity is typically "sip_<phone_number>"
         # For inbound, we might need to find the remote participant.
         participant_identity = None
-<<<<<<< HEAD
 
-=======
-        
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
         # If we stored the phone number from metadata, we can construct the identity
         if self.phone_number:
             participant_identity = f"sip_{self.phone_number}"
@@ -807,11 +623,7 @@ class TransferFunctions(llm.ToolContext):
             for p in self.ctx.room.remote_participants.values():
                 participant_identity = p.identity
                 break
-<<<<<<< HEAD
 
-=======
-        
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
         if not participant_identity:
             logger.error("Could not determine participant identity for transfer")
             return "Failed to transfer: could not identify the caller."
@@ -833,45 +645,8 @@ class TransferFunctions(llm.ToolContext):
             return f"Error executing transfer: {e}"
 
 
-<<<<<<< HEAD
-class OutboundAssistant(Agent):
-=======
-<<<<<<< HEAD
-def _build_agent_instructions() -> str:
-    agent_name = os.getenv("AGENT_PERSONA_NAME", "Shubhi")
-    company = os.getenv("AGENT_COMPANY_NAME", "real estate company")
-    default_language = os.getenv("AGENT_DEFAULT_LANGUAGE", "hi").strip().lower()
-    language_instruction = (
-        "Primary language is Hindi. Reply in simple Hindi by default. "
-        "If the caller speaks English, switch to English. If mixed, use Hinglish."
-        if default_language == "hi"
-        else "Primary language is English. If the caller speaks Hindi, switch to Hindi."
-    )
-    return f"""
-            You are {agent_name}, a helpful and professional voice agent from {company}.
-            {language_instruction}
-            
-            Key behaviors:
-            1. Your first spoken turn after the call is answered must be a brief intro only.
-            2. After the caller acknowledges, continue the conversation naturally.
-            3. Be concise and respectful of the user's time.
-            3a. Default to one short sentence.
-            3b. Ask only one question at a time.
-            3c. Keep every reply short unless the caller asks for detail.
-            4. Keep conversation focused on real-estate context (property, site visit, budget, location, timeline).
-            5. After the intro, ask whether it is a good time to talk before going deeper.
-            6. Use transfer_call ONLY when user clearly asks transfer (word must include "transfer" or "live agent").
-            7. Never trigger transfer from partial or unclear words.
-            8. If transfer intent is unclear, ask a clarification question instead of calling transfer_call.
-            9. Never call transfer_call on one-word or noisy utterances.
-            """
-
-
-=======
->>>>>>> 242873f8d3b37699d23ce567dadb7d39587d30bf
 class OutboundAssistant(Agent):
 
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
     """
     An AI agent tailored for outbound calls.
     Attempts to be helpful and concise.
@@ -915,11 +690,7 @@ async def _speak_scripted_line(
 async def entrypoint(ctx: agents.JobContext):
     """
     Main entrypoint for the agent.
-<<<<<<< HEAD
 
-=======
-    
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
     For outbound calls:
     1. Checks for 'phone_number' in the job metadata.
     2. Connects to the room.
@@ -927,35 +698,7 @@ async def entrypoint(ctx: agents.JobContext):
     4. Waits for answer before speaking.
     """
     logger.info(f"Connecting to room: {ctx.room.name}")
-<<<<<<< HEAD
 
-=======
-<<<<<<< HEAD
-
-    provider = _get_realtime_provider()
-    if _use_realtime_audio() and provider == "google":
-        google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-        if not google_key:
-            logger.error("GOOGLE_API_KEY is missing in environment. Cannot start Gemini Live conversation.")
-            ctx.shutdown()
-            return
-    else:
-        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not openai_key:
-            logger.error("OPENAI_API_KEY is missing in environment. Cannot start outbound conversation.")
-            ctx.shutdown()
-            return
-        if openai_key.startswith("sk-or-v1"):
-            logger.error(
-                "Detected OpenRouter key in OPENAI_API_KEY. "
-                "Please set a real OpenAI key (sk-... / sk-proj-...) in .env."
-            )
-            ctx.shutdown()
-            return
-=======
->>>>>>> 242873f8d3b37699d23ce567dadb7d39587d30bf
-    
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
     # parse the phone number from the metadata sent by the dispatch script
     phone_number = None
     try:
@@ -981,11 +724,7 @@ async def entrypoint(ctx: agents.JobContext):
             tools=fnc_ctx.flatten(),
             turn_detection="realtime_llm",
             allow_interruptions=True,
-<<<<<<< HEAD
             false_interruption_timeout=_get_float_env("SESSION_FALSE_INTERRUPTION_TIMEOUT", 0.25),
-=======
-            false_interruption_timeout=_get_float_env("SESSION_FALSE_INTERRUPTION_TIMEOUT", 0.35),
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
             user_away_timeout=_get_float_env("SESSION_USER_AWAY_TIMEOUT", 15.0),
         )
     else:
@@ -1008,11 +747,7 @@ async def entrypoint(ctx: agents.JobContext):
             min_interruption_duration=_get_float_env("SESSION_MIN_INTERRUPTION_DURATION", 0.10),
             min_endpointing_delay=_get_float_env("SESSION_MIN_ENDPOINTING_DELAY", 0.14),
             max_endpointing_delay=_get_float_env("SESSION_MAX_ENDPOINTING_DELAY", 0.45),
-<<<<<<< HEAD
             false_interruption_timeout=_get_float_env("SESSION_FALSE_INTERRUPTION_TIMEOUT", 0.25),
-=======
-            false_interruption_timeout=_get_float_env("SESSION_FALSE_INTERRUPTION_TIMEOUT", 0.35),
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
             preemptive_generation=_get_bool_env("SESSION_PREEMPTIVE_GENERATION", True),
         )
 
@@ -1113,13 +848,8 @@ async def entrypoint(ctx: agents.JobContext):
                     room_name=ctx.room.name,
                     sip_trunk_id=trunk_id,
                     sip_call_to=phone_number,
-<<<<<<< HEAD
                     participant_identity=f"sip_{phone_number}",  # Unique ID for the SIP user
                     wait_until_answered=True,  # Important: Wait for pickup before continuing
-=======
-                    participant_identity=f"sip_{phone_number}", # Unique ID for the SIP user
-                    wait_until_answered=True, # Important: Wait for pickup before continuing
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
                 )
             )
             logger.info("Call answered! Agent is now listening.")
@@ -1143,11 +873,7 @@ async def entrypoint(ctx: agents.JobContext):
                 reprompt_task = asyncio.create_task(_reprompt_if_no_speech())
             except Exception as greet_error:
                 logger.warning(f"Failed to send initial greeting: {greet_error}")
-<<<<<<< HEAD
 
-=======
-            
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
         except Exception as e:
             logger.error(f"Failed to place outbound call: {e}")
             # Ensure we clean up if the call fails
@@ -1164,14 +890,7 @@ if __name__ == "__main__":
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-<<<<<<< HEAD
             agent_name="outbound-caller",
             num_idle_processes=max(0, _get_int_env("AGENT_NUM_IDLE_PROCESSES", 2)),
         )
     )
-=======
-            agent_name="outbound-caller", 
-            num_idle_processes=max(0, _get_int_env("AGENT_NUM_IDLE_PROCESSES", 1)),
-        )
-    )
->>>>>>> 7c5596734fe3e9d4d5c620b74ab1c1f092787184
